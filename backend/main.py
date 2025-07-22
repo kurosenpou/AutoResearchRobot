@@ -19,16 +19,22 @@ if parent_dir not in sys.path:
 
 try:
     # Try relative imports first (when run as module)
-    from .processors import process_nve_simulation, process_nvt_simulation, process_dxa_analysis, process_ws_analysis, OVITO_PROCESSORS_AVAILABLE
+    from .processors import process_nve_simulation, process_nvt_simulation, process_simulation_auto, process_dxa_analysis, process_ws_analysis, OVITO_PROCESSORS_AVAILABLE
+    from .processors.simulation_manager import run_complete_simulation_workflow
+    from .utils.ensemble_detector import detect_simulation_ensemble, analyze_data_format
     from .core.elastic_constants import load_elastic_constants_from_directory
 except ImportError:
     # Fall back to absolute imports (when run as script)
     try:
-        from processors import process_nve_simulation, process_nvt_simulation, process_dxa_analysis, process_ws_analysis, OVITO_PROCESSORS_AVAILABLE
+        from processors import process_nve_simulation, process_nvt_simulation, process_simulation_auto, process_dxa_analysis, process_ws_analysis, OVITO_PROCESSORS_AVAILABLE
+        from processors.simulation_manager import run_complete_simulation_workflow
+        from utils.ensemble_detector import detect_simulation_ensemble, analyze_data_format
         from core.elastic_constants import load_elastic_constants_from_directory
     except ImportError:
         # Last resort - try with backend prefix
-        from backend.processors import process_nve_simulation, process_nvt_simulation, process_dxa_analysis, process_ws_analysis, OVITO_PROCESSORS_AVAILABLE
+        from backend.processors import process_nve_simulation, process_nvt_simulation, process_simulation_auto, process_dxa_analysis, process_ws_analysis, OVITO_PROCESSORS_AVAILABLE
+        from backend.processors.simulation_manager import run_complete_simulation_workflow
+        from backend.utils.ensemble_detector import detect_simulation_ensemble, analyze_data_format
         from backend.core.elastic_constants import load_elastic_constants_from_directory
 
 
@@ -184,6 +190,77 @@ def process_ws_command(args):
     )
 
 
+def process_simulation_workflow_command(args):
+    """Process complete simulation workflow command"""
+    print("🎯 Processing Complete Simulation Workflow...")
+    
+    # Get SFTP configuration
+    if hasattr(args, 'config') and args.config and os.path.exists(args.config):
+        import json
+        with open(args.config, 'r') as f:
+            sftp_config = json.load(f)
+    else:
+        sftp_config = create_sftp_config_interactive()
+    
+    return run_complete_simulation_workflow(
+        local_path=args.local_path,
+        remote_path=args.remote_path,
+        nve_output=args.nve_output,
+        ws_output=args.ws_output,
+        dxa_output=args.dxa_output,
+        sftp_config=sftp_config
+    )
+
+
+def process_auto_command(args):
+    """Process automatic ensemble detection and analysis"""
+    print("🔍 Auto-detecting simulation ensemble type...")
+    
+    # First analyze the file format
+    analysis = analyze_data_format(args.input_file)
+    
+    print(f"📊 File Analysis Results:")
+    print(f"  📁 File: {args.input_file}")
+    print(f"  📏 Size: {analysis['file_size']:,} bytes")
+    print(f"  📊 Columns: {analysis['num_columns']}")
+    print(f"  📋 Has header: {'Yes' if analysis['has_header'] else 'No'}")
+    print(f"  🧪 Has etally: {'Yes' if analysis['has_etally'] else 'No'}")
+    print(f"  📈 Data lines: {analysis['data_lines']}")
+    print(f"  💬 Comment lines: {analysis['comment_lines']}")
+    
+    ensemble_type = analysis['ensemble_type']
+    print(f"\n🔬 Detected ensemble: {ensemble_type.upper()}")
+    
+    if ensemble_type == 'nvt':
+        print("🌡️ Using NVT processor...")
+    else:
+        print("⚙️ Using NVE processor...")
+    
+    # Get SFTP configuration if needed
+    sftp_config = None
+    if args.remote:
+        sftp_config = create_sftp_config_interactive()
+    
+    # Process with auto-detection
+    success = process_simulation_auto(
+        simulation_file=args.input_file,
+        output_file=args.output_file,
+        elastic_constants_dir=args.elastic_dir,
+        elastic_files=args.elastic_files.split(',') if args.elastic_files else None,
+        remote=args.remote,
+        sftp_config=sftp_config,
+        compliance_params=None,  # Could add compliance parsing here if needed
+        strain_threshold=getattr(args, 'threshold', 0.001)
+    )
+    
+    if success:
+        print(f"\n✅ {ensemble_type.upper()} analysis completed successfully!")
+    else:
+        print(f"\n❌ {ensemble_type.upper()} analysis failed!")
+    
+    return success
+
+
 def main():
     """Main command-line interface"""
     parser = argparse.ArgumentParser(
@@ -216,13 +293,40 @@ def main():
   # Remote NVT with pre-calculated compliance
   python main.py nvt user@server:/nvt.txt output.csv --remote --compliance "1.2e-11,-1.8e-12,2.9e-11"
 
-� DXA Dislocation Analysis (requires OVITO):
+🤖 Auto-Detection Processing:
+  # Automatically detect ensemble type (NVE/NVT) and process accordingly
+  python main.py auto simulation.txt results.csv --elastic-dir ./elastic_data/
+  
+  # Remote auto-detection with threshold adjustment
+  python main.py auto user@server:/data.txt output.csv --remote --threshold 0.0005
+  
+  # Auto-detection analyzes file format and uses appropriate processor:
+  # - Files with 'etally' column → NVT processor
+  # - Files without 'etally' column → NVE processor
+
+🔬 DXA Dislocation Analysis (requires OVITO):
   # Local trajectory analysis
   python main.py dxa "trajectory*.dump" reference.dump dislocation_results.csv
   
   # Remote analysis with specific frames
   python main.py dxa user@server:/path/traj* reference.dump results.csv --remote --frames 0 100 200
+
+🧪 WS Vacancy Analysis (requires OVITO):
+  # Local trajectory with reference structure
+  python main.py ws "trajectory*.dump" reference.structure vacancy_results.csv
   
+  # Remote analysis with GPU acceleration disabled
+  python main.py ws user@server:/path/traj* ref.dump results.csv --remote --no-gpu
+
+🎯 Complete Simulation Workflow:
+  # Upload files, run simulation, monitor, and analyze automatically
+  python main.py simulate ./input_files/ /remote/simulation/path/ nve_results.csv ws_results.csv dxa_results.csv
+  
+  # With SFTP configuration file
+  python main.py simulate ./local_files/ /hpc/user/sim001/ nve.csv ws.csv dxa.csv --config sftp_config.json
+  
+  Required input files: *.lmp, in.*.lammps, run.*.sh, dbg.*.sh
+  Monitors for restart.relax completion, then runs analyses on *d2-*.txt and shear/3.dump.shear-II.* files
   # GPU-accelerated processing
   python main.py dxa trajectory.dump reference.dump results.csv
 
@@ -351,6 +455,34 @@ def main():
         help='Strain threshold for statistical analysis filtering (default: 0.002)'
     )
     
+    # Auto-detection command
+    auto_parser = subparsers.add_parser(
+        'auto',
+        help='Automatically detect ensemble type (NVE/NVT) and process simulation data',
+        description='Automatically detect simulation ensemble type based on data format and run appropriate analysis'
+    )
+    auto_parser.add_argument('input_file', help='Input simulation data file')
+    auto_parser.add_argument('output_file', help='Output CSV file for analysis results')
+    auto_parser.add_argument(
+        '--elastic-dir', 
+        help='Directory containing elastic constants files (c1144.txt, c2255.txt, etc.)'
+    )
+    auto_parser.add_argument(
+        '--elastic-files', 
+        help='Comma-separated list of elastic constants files (for remote access)'
+    )
+    auto_parser.add_argument(
+        '--remote', 
+        action='store_true', 
+        help='Input files are on remote SFTP server'
+    )
+    auto_parser.add_argument(
+        '--threshold', 
+        type=float, 
+        default=0.001, 
+        help='Strain threshold for statistical analysis filtering (default: 0.001)'
+    )
+    
     # DXA analysis command
     if OVITO_PROCESSORS_AVAILABLE:
         dxa_parser = subparsers.add_parser(
@@ -405,6 +537,22 @@ def main():
             help='Disable GPU acceleration for OVITO processing'
         )
     
+    # Complete simulation workflow command
+    sim_parser = subparsers.add_parser(
+        'simulate',
+        help='Complete simulation workflow: upload, run, monitor, and analyze',
+        description='Complete MD simulation workflow from local files to remote HPC server with automatic analysis'
+    )
+    sim_parser.add_argument('local_path', help='Local directory containing input files (*.lmp, in.*.lammps, run.*.sh, dbg.*.sh)')
+    sim_parser.add_argument('remote_path', help='Remote directory to upload files to and run simulation')
+    sim_parser.add_argument('nve_output', help='Output file for NVE/NVT analysis results')
+    sim_parser.add_argument('ws_output', help='Output file for Wigner-Seitz vacancy analysis results')
+    sim_parser.add_argument('dxa_output', help='Output file for DXA dislocation analysis results')
+    sim_parser.add_argument(
+        '--config', 
+        help='SFTP configuration file (JSON format with hostname, username, etc.)'
+    )
+    
     # Parse arguments
     args = parser.parse_args()
     
@@ -422,10 +570,14 @@ def main():
         elif args.command in ['nve', 'nvt']:
             args.ensemble = args.command
             success = process_simulation_data(args)
+        elif args.command == 'auto':
+            success = process_auto_command(args)
         elif args.command == 'dxa':
             success = process_dxa_command(args)
         elif args.command == 'ws':
             success = process_ws_command(args)
+        elif args.command == 'simulate':
+            success = process_simulation_workflow_command(args)
         else:
             print(f"❌ Unknown command: {args.command}")
             success = False
