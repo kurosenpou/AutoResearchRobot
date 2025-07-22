@@ -29,7 +29,7 @@ A comprehensive Python backend system for automated thermomechanical analysis an
 ### Setup
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/AutoResearchRobot.git
+git clone https://github.com/kurosenpou/AutoResearchRobot.git
 cd AutoResearchRobot
 
 # Install dependencies
